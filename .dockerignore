@@ -1,0 +1,20 @@
+# .env is supplied at runtime through compose's env_file, never baked into the
+# image.
+.env
+.env.*
+
+.venv/
+__pycache__/
+*.py[cod]
+
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+.git/
+.claude/
+
+# Not part of the agent service: the Pipe is installed through Open WebUI's
+# admin UI, and tests run on the host.
+openwebui/
+tests/

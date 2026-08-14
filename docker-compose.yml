@@ -1,0 +1,32 @@
+# Stage 2: Open WebUI over the agent service.
+#
+# Honcho, Postgres and Redis are stage 4 — see Build Order in DESIGN.md.
+
+services:
+  agent:
+    build: .
+    env_file: .env
+    # Published so the service stays testable with curl from the host,
+    # independently of Open WebUI.
+    ports:
+      - "${AGENT_PORT:-8080}:${AGENT_PORT:-8080}"
+
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:main
+    depends_on:
+      - agent
+    ports:
+      - "${OPEN_WEBUI_PORT:-3000}:8080"
+    environment:
+      WEBUI_SECRET_KEY: ${WEBUI_SECRET_KEY}
+      # Default for the Pipe's AGENT_SERVICE_URL valve, overridable per-install
+      # in the admin UI.
+      AGENT_SERVICE_URL: ${AGENT_SERVICE_URL:-http://agent:8080}
+      # Nothing serves Ollama here; without this, startup is spent timing out
+      # against a host that will never answer.
+      ENABLE_OLLAMA_API: "false"
+    volumes:
+      - open-webui:/app/backend/data
+
+volumes:
+  open-webui:
