@@ -11,6 +11,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from agent.agent import build_agent
+from agent.memory import load_context, record_turn
 from agent.settings import settings
 
 logging.basicConfig(level=settings.log_level)
@@ -28,8 +29,14 @@ def sse(event: str, payload: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(payload)}\n\n"
 
 
-async def stream_chat(message: str) -> AsyncIterator[str]:
+async def stream_chat(message: str, peer_id: str, session_id: str) -> AsyncIterator[str]:
     """Translate the Strands event stream into SSE frames.
+
+    Memory brackets the stream: context is read before the agent is built,
+    because it goes into the system prompt, and the turn is written after the
+    last token, because the reply does not exist until then. The write is
+    awaited rather than left running — it is one request, and losing a turn
+    silently because the response finished first would be worse than the wait.
 
     Tool boundaries come from the two message events, not from
     `current_tool_use`: that one arrives once per input delta carrying a
@@ -42,11 +49,13 @@ async def stream_chat(message: str) -> AsyncIterator[str]:
     events. The user-role message carrying `toolResult` blocks is what actually
     arrives.
     """
-    agent = build_agent()
+    agent = build_agent(peer_id, await load_context(peer_id))
     in_flight: dict[str, tuple[str, float]] = {}
+    reply: list[str] = []
 
     async for event in agent.stream_async(message):
         if "data" in event:
+            reply.append(event["data"])
             yield sse("token", {"text": event["data"]})
             continue
 
@@ -76,19 +85,26 @@ async def stream_chat(message: str) -> AsyncIterator[str]:
                     {"id": tool_use_id, "name": name, "status": status, "seconds": seconds},
                 )
 
+    await record_turn(peer_id, session_id, message, "".join(reply))
     yield sse("done", {})
 
 
 @app.post("/chat")
 async def chat(
     request: ChatRequest,
-    x_user_id: Annotated[str | None, Header()] = None,
+    x_user_id: Annotated[str, Header()],
+    x_session_id: Annotated[str, Header()],
 ) -> StreamingResponse:
-    # Open WebUI's user ID, sent by the Pipe. Logged only — it becomes the Honcho
-    # peer ID in stage 4.
-    logger.info("chat request from user %s", x_user_id)
+    """Run one turn. Both headers are required, hence no defaults.
+
+    x_user_id is Open WebUI's user ID and becomes the Honcho peer ID verbatim;
+    x_session_id is its chat ID. Guessing either would file a turn under the
+    wrong person or the wrong conversation, so a missing header is a 422 rather
+    than something we paper over.
+    """
+    logger.info("chat request from user %s in session %s", x_user_id, x_session_id)
     return StreamingResponse(
-        stream_chat(request.message),
+        stream_chat(request.message, x_user_id, x_session_id),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )

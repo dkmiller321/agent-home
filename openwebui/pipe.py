@@ -74,11 +74,19 @@ class Pipe:
     def pipes(self) -> list[dict]:
         return [{"id": "agent-home", "name": "Agent Home"}]
 
-    async def pipe(self, body: dict, __user__: dict, __event_emitter__) -> AsyncIterator[str]:
+    async def pipe(
+        self,
+        body: dict,
+        __user__: dict,
+        __metadata__: dict,
+        __event_emitter__,
+    ) -> AsyncIterator[str]:
         """Stream one turn.
 
-        Open WebUI's user ID is passed through as a header. The agent only logs
-        it today; it becomes the Honcho peer ID in stage 4.
+        Open WebUI's user and chat IDs go across as headers and become the
+        Honcho peer and session IDs unchanged — memory is keyed on identity the
+        UI already has, so there is nothing to generate here. Both are required
+        by the agent, which answers 422 without them.
         """
         message = body["messages"][-1]["content"]
 
@@ -91,7 +99,10 @@ class Pipe:
             async with session.post(
                 f"{self.valves.AGENT_SERVICE_URL}/chat",
                 json={"message": message},
-                headers={"X-User-Id": __user__["id"]},
+                headers={
+                    "X-User-Id": __user__["id"],
+                    "X-Session-Id": __metadata__["chat_id"],
+                },
             ) as response:
                 response.raise_for_status()
 

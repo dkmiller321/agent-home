@@ -1,11 +1,16 @@
-# Stage 2: Open WebUI over the agent service.
+# Stage 4: Open WebUI over the agent service, with Honcho memory behind it.
 #
-# Honcho, Postgres and Redis are stage 4 — see Build Order in DESIGN.md.
+# Service names follow DESIGN.md, not Honcho's own compose example, which calls
+# these `api` and `database`. Everything Honcho-side is configured through .env
+# using Honcho's variable names — see the sections there.
 
 services:
   agent:
     build: .
     env_file: .env
+    depends_on:
+      honcho:
+        condition: service_healthy
     # Published so the service stays testable with curl from the host,
     # independently of Open WebUI.
     ports:
@@ -28,5 +33,80 @@ services:
     volumes:
       - open-webui:/app/backend/data
 
+  honcho:
+    image: ghcr.io/plastic-labs/honcho:v3.0.12
+    # The image's own CMD is a bare `fastapi run`, which starts the API against
+    # an unmigrated database. This entrypoint runs provision_db.py first — that
+    # is what creates the pgvector extension and the schema, dimension included.
+    entrypoint: ["sh", "docker/entrypoint.sh"]
+    env_file: .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    # Published so memory is inspectable with curl when a reply looks wrong.
+    ports:
+      - "${HONCHO_PORT:-8000}:8000"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "/app/.venv/bin/python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=2).read()",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+  honcho-deriver:
+    image: ghcr.io/plastic-labs/honcho:v3.0.12
+    # Fact extraction — the reason memory outlives a session, and the reason it
+    # is eventually consistent rather than immediate.
+    entrypoint: ["/app/.venv/bin/python", "-m", "src.deriver"]
+    env_file: .env
+    depends_on:
+      # Waits on the API rather than the database so migrations have finished;
+      # both processes share the schema and only the API creates it.
+      honcho:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  postgres:
+    # pgvector, not stock postgres: Honcho's migration runs CREATE EXTENSION
+    # vector, which needs the extension present in the image to succeed.
+    image: pgvector/pgvector:pg15
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  redis:
+    image: redis:8.2
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
 volumes:
   open-webui:
+  pgdata:
+  redis-data:
