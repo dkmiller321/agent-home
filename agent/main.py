@@ -2,6 +2,7 @@
 
 import json
 import logging
+import time
 from collections.abc import AsyncIterator
 from typing import Annotated
 
@@ -30,22 +31,50 @@ def sse(event: str, payload: dict) -> str:
 async def stream_chat(message: str) -> AsyncIterator[str]:
     """Translate the Strands event stream into SSE frames.
 
-    Tool use arrives as a partial-input chunk per delta, so tool calls are
-    de-duplicated on toolUseId and announced once, when first seen.
+    Tool boundaries come from the two message events, not from
+    `current_tool_use`: that one arrives once per input delta carrying a
+    half-built JSON string, so it can say a tool is starting but not which URL
+    it is fetching. The assistant message lands with inputs already parsed, and
+    always before any tool runs.
+
+    `ToolResultEvent` looks like the obvious finish signal and is not one — it
+    sets `is_callback_event` to False, and `stream_async` only yields callback
+    events. The user-role message carrying `toolResult` blocks is what actually
+    arrives.
     """
     agent = build_agent()
-    announced_tool_uses: set[str | None] = set()
+    in_flight: dict[str, tuple[str, float]] = {}
 
     async for event in agent.stream_async(message):
         if "data" in event:
             yield sse("token", {"text": event["data"]})
             continue
 
-        tool_use = event.get("current_tool_use")
-        if tool_use and tool_use.get("toolUseId") not in announced_tool_uses:
-            announced_tool_uses.add(tool_use.get("toolUseId"))
-            logger.info("tool call: %s", tool_use.get("name"))
-            yield sse("tool", {"name": tool_use.get("name")})
+        message_event = event.get("message")
+        if not message_event:
+            continue
+
+        for block in message_event.get("content", []):
+            if tool_use := block.get("toolUse"):
+                tool_use_id, name = tool_use["toolUseId"], tool_use["name"]
+                in_flight[tool_use_id] = (name, time.monotonic())
+                logger.info("tool start: %s %s", name, tool_use.get("input"))
+                yield sse(
+                    "tool_start",
+                    {"id": tool_use_id, "name": name, "input": tool_use.get("input")},
+                )
+
+            elif tool_result := block.get("toolResult"):
+                tool_use_id = tool_result["toolUseId"]
+                # Absent only if a result arrives for a tool we never announced.
+                name, started_at = in_flight.pop(tool_use_id, ("unknown", time.monotonic()))
+                status = tool_result.get("status", "success")
+                seconds = round(time.monotonic() - started_at, 1)
+                logger.info("tool end: %s %s in %ss", name, status, seconds)
+                yield sse(
+                    "tool_end",
+                    {"id": tool_use_id, "name": name, "status": status, "seconds": seconds},
+                )
 
     yield sse("done", {})
 

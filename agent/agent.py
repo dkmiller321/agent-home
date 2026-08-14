@@ -5,6 +5,7 @@ from strands.models.openai import OpenAIModel
 
 from agent.settings import settings
 from agent.tools.current_time import current_time
+from agent.tools.web_fetch import web_fetch
 
 SYSTEM_PROMPT = (
     "You are a helpful assistant. When a tool can answer part of the question, "
@@ -30,7 +31,7 @@ def build_agent() -> Agent:
     )
     return Agent(
         model=model,
-        tools=[current_time],
+        tools=[current_time, web_fetch],
         system_prompt=SYSTEM_PROMPT,
         callback_handler=None,
     )
