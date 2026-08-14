@@ -47,9 +47,11 @@ def use_agent(monkeypatch, events, context=""):
     return built, written
 
 
-def drain(message, peer_id="u1", session_id="s1"):
+def drain(message, peer_id="u1", session_id="s1", remember=True):
     async def collect():
-        return [frame async for frame in main.stream_chat(message, peer_id, session_id)]
+        return [
+            frame async for frame in main.stream_chat(message, peer_id, session_id, remember)
+        ]
 
     return asyncio.run(collect())
 
@@ -212,7 +214,7 @@ def test_nothing_is_written_while_tokens_are_still_arriving(monkeypatch):
     _, written = use_agent(monkeypatch, [{"data": "one "}, {"data": "two"}])
 
     async def consume():
-        async for frame in main.stream_chat("hi", "kyle", "chat-9"):
+        async for frame in main.stream_chat("hi", "kyle", "chat-9", True):
             if "token" in frame:
                 assert written == []
 
@@ -235,3 +237,24 @@ def test_tool_output_is_not_part_of_the_recorded_reply(monkeypatch):
     drain("what time is it?")
 
     assert written[0][3] == "It is noon."
+
+
+def test_background_generation_is_answered_but_not_remembered(monkeypatch):
+    """Open WebUI routes title, tag and follow-up prompts through the selected
+    model, which is us. They are the UI talking to itself, not the user, and one
+    browser message arrives as four. Answer them; do not file them."""
+    _, written = use_agent(monkeypatch, [{"data": '{"title": "Roman Empire"}'}])
+
+    frames = parse(drain("### Task: Generate a concise title...", remember=False))
+
+    assert frames == [("token", {"text": '{"title": "Roman Empire"}'}), ("done", {})]
+    assert written == []
+
+
+def test_background_generation_does_not_pay_for_context(monkeypatch):
+    """A title prompt cannot use a profile, so fetching one is a wasted call."""
+    built, _ = use_agent(monkeypatch, [{"data": "x"}], context="- Kyle uses Neovim.")
+
+    drain("### Task: Generate 1-3 broad tags...", peer_id="kyle", remember=False)
+
+    assert built == [("kyle", "")]

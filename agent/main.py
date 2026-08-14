@@ -29,7 +29,9 @@ def sse(event: str, payload: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(payload)}\n\n"
 
 
-async def stream_chat(message: str, peer_id: str, session_id: str) -> AsyncIterator[str]:
+async def stream_chat(
+    message: str, peer_id: str, session_id: str, remember: bool
+) -> AsyncIterator[str]:
     """Translate the Strands event stream into SSE frames.
 
     Memory brackets the stream: context is read before the agent is built,
@@ -37,6 +39,11 @@ async def stream_chat(message: str, peer_id: str, session_id: str) -> AsyncItera
     last token, because the reply does not exist until then. The write is
     awaited rather than left running — it is one request, and losing a turn
     silently because the response finished first would be worse than the wait.
+
+    `remember` is false for Open WebUI's background generation, which still
+    needs an answer but is not the user speaking. Both halves of memory are
+    skipped together: reading context for a title prompt would waste the call,
+    and writing one would poison the profile.
 
     Tool boundaries come from the two message events, not from
     `current_tool_use`: that one arrives once per input delta carrying a
@@ -49,7 +56,7 @@ async def stream_chat(message: str, peer_id: str, session_id: str) -> AsyncItera
     events. The user-role message carrying `toolResult` blocks is what actually
     arrives.
     """
-    agent = build_agent(peer_id, await load_context(peer_id))
+    agent = build_agent(peer_id, await load_context(peer_id) if remember else "")
     in_flight: dict[str, tuple[str, float]] = {}
     reply: list[str] = []
 
@@ -85,7 +92,8 @@ async def stream_chat(message: str, peer_id: str, session_id: str) -> AsyncItera
                     {"id": tool_use_id, "name": name, "status": status, "seconds": seconds},
                 )
 
-    await record_turn(peer_id, session_id, message, "".join(reply))
+    if remember:
+        await record_turn(peer_id, session_id, message, "".join(reply))
     yield sse("done", {})
 
 
@@ -94,17 +102,27 @@ async def chat(
     request: ChatRequest,
     x_user_id: Annotated[str, Header()],
     x_session_id: Annotated[str, Header()],
+    x_task: Annotated[str | None, Header()] = None,
 ) -> StreamingResponse:
-    """Run one turn. Both headers are required, hence no defaults.
+    """Run one turn. The two identity headers are required, hence no defaults.
 
     x_user_id is Open WebUI's user ID and becomes the Honcho peer ID verbatim;
     x_session_id is its chat ID. Guessing either would file a turn under the
     wrong person or the wrong conversation, so a missing header is a 422 rather
     than something we paper over.
+
+    x_task is the opposite: present only for Open WebUI's own title, tag and
+    follow-up generation, which it routes through the selected model. Anything
+    carrying it gets answered but not remembered.
     """
-    logger.info("chat request from user %s in session %s", x_user_id, x_session_id)
+    logger.info(
+        "chat request from user %s in session %s%s",
+        x_user_id,
+        x_session_id,
+        f" (task: {x_task})" if x_task else "",
+    )
     return StreamingResponse(
-        stream_chat(request.message, x_user_id, x_session_id),
+        stream_chat(request.message, x_user_id, x_session_id, remember=x_task is None),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )

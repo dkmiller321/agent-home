@@ -79,6 +79,7 @@ class Pipe:
         body: dict,
         __user__: dict,
         __metadata__: dict,
+        __task__: str | None,
         __event_emitter__,
     ) -> AsyncIterator[str]:
         """Stream one turn.
@@ -87,6 +88,13 @@ class Pipe:
         Honcho peer and session IDs unchanged — memory is keyed on identity the
         UI already has, so there is nothing to generate here. Both are required
         by the agent, which answers 422 without them.
+
+        `__task__` names Open WebUI's own background work — title, tag and
+        follow-up generation — which it routes through whichever model is
+        selected, meaning us. It is None for a real turn. Passing it on is what
+        lets the agent tell those apart; without it one message from the browser
+        arrives as four, and Honcho learns that the user enjoys being asked to
+        generate tags.
         """
         message = body["messages"][-1]["content"]
 
@@ -95,14 +103,19 @@ class Pipe:
                 {"type": "status", "data": {"description": description, "done": done}}
             )
 
+        headers = {
+            "X-User-Id": __user__["id"],
+            "X-Session-Id": __metadata__["chat_id"],
+        }
+        # Absent on a real turn, which is what the agent keys off.
+        if __task__:
+            headers["X-Task"] = __task__
+
         async with aiohttp.ClientSession() as session:
             async with session.post(
                 f"{self.valves.AGENT_SERVICE_URL}/chat",
                 json={"message": message},
-                headers={
-                    "X-User-Id": __user__["id"],
-                    "X-Session-Id": __metadata__["chat_id"],
-                },
+                headers=headers,
             ) as response:
                 response.raise_for_status()
 
