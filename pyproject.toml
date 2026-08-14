@@ -1,0 +1,20 @@
+[project]
+name = "agent-home"
+version = "0.1.0"
+description = "Locally-hosted chat app: Open WebUI over a Strands agent with Honcho memory"
+requires-python = ">=3.11"
+dependencies = [
+    "strands-agents[openai]",
+    "honcho-ai",
+    "fastapi",
+    "uvicorn[standard]",
+    "pydantic-settings",
+]
+
+[dependency-groups]
+dev = [
+    "pytest",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
